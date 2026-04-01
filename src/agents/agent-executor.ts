@@ -3,11 +3,13 @@ import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { spawn, execSync } from 'child_process';
+import { withRetry, classifyError } from '../utils/retry.js';
 import { DynamicModelSelector, ModelRecommendation } from '../utils/model-selector.js';
 import { getClaudeModelMap, getDefaultContextWindow } from '../utils/model-registry.js';
 import { RLMExecutor } from './rlm/rlm-executor.js';
 import { RLMCostTracker } from './rlm/rlm-cost-tracker.js';
 import { RLMConfig, RLMActivation } from './rlm/rlm-types.js';
+import { ContentReplacer } from '../utils/content-replacement.js';
 
 export interface AgentTask {
   id?: string;
@@ -40,6 +42,7 @@ export class ClaudeExecutor {
   private rlmExecutor: RLMExecutor | null = null;
   private rlmCostTracker: RLMCostTracker | null = null;
   private rlmConfig: RLMConfig | null = null;
+  private contentReplacer: ContentReplacer;
   private static globalTargetCwd: string | undefined;  // Shared across all instances
 
   /**
@@ -59,6 +62,7 @@ export class ClaudeExecutor {
     this.tasksInProgress = new Map();
     this.tasksDir = tasksDir;
     this.modelSelector = new DynamicModelSelector();
+    this.contentReplacer = new ContentReplacer(path.join(path.dirname(tasksDir), 'content-cache'));
 
     // Initialize RLM if config provided
     if (rlmConfig) {
@@ -118,13 +122,40 @@ export class ClaudeExecutor {
     this.tasksInProgress.set(taskId, abortController);
 
     try {
+      let result: AgentResult;
+
       if (this.isClaudeCode) {
         // File-based execution for Claude Code
-        return await this.executeViaFiles(taskId, task);
+        result = await this.executeViaFiles(taskId, task);
       } else {
         // Direct API execution for standalone
-        return await this.executeViaAPI(taskId, task);
+        result = await this.executeViaAPI(taskId, task);
       }
+
+      // Apply content replacement for large results to keep context manageable
+      if (result.success && result.output != null) {
+        const outputStr = typeof result.output === 'string'
+          ? result.output
+          : JSON.stringify(result.output);
+
+        if (outputStr.length > 50_000) {
+          const label = `${task.type}_${taskId}`;
+          const replaced = this.contentReplacer.replaceIfLarge(
+            outputStr,
+            50_000,
+            label,
+          );
+          // If content was replaced, store the summarized version
+          if (replaced !== outputStr) {
+            result = {
+              ...result,
+              output: replaced,
+            };
+          }
+        }
+      }
+
+      return result;
     } finally {
       this.tasksInProgress.delete(taskId);
     }
@@ -264,7 +295,41 @@ export class ClaudeExecutor {
   }
 
   private async executeViaCLI(prompt: string, taskId: string, taskType: string, model: 'haiku' | 'sonnet' | 'opus'): Promise<AgentResult> {
-    return new Promise((resolve) => {
+    // Wrap the entire CLI call with retry logic for rate limits and transient failures.
+    // On non-retryable errors the inner function throws, which surfaces after all
+    // retries are exhausted — we catch that and return a failed AgentResult.
+    try {
+      return await withRetry<AgentResult>(
+        () => this._spawnCLI(prompt, taskId, taskType, model),
+        {
+          maxRetries: 3,
+          baseDelay: 2000,
+          maxDelay: 30_000,
+          onRetry: (_error, attempt, delay, kind) => {
+            console.log(
+              `[retry] Claude CLI ${kind} error for task ${taskId} — ` +
+              `attempt ${attempt}, waiting ${Math.round(delay)}ms`,
+            );
+          },
+        },
+      );
+    } catch (error) {
+      // All retries exhausted — return a failed result
+      return {
+        success: false,
+        output: null,
+        error: `Claude CLI failed after retries: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Internal: spawn a single Claude CLI invocation.
+   * Rejects on retryable errors (rate limits, connection issues) so
+   * `withRetry` can catch and retry. Resolves normally otherwise.
+   */
+  private _spawnCLI(prompt: string, taskId: string, taskType: string, model: 'haiku' | 'sonnet' | 'opus'): Promise<AgentResult> {
+    return new Promise((resolve, reject) => {
       // Map model names to Claude model IDs
       const modelMap = getClaudeModelMap();
 
@@ -303,17 +368,37 @@ export class ClaudeExecutor {
       let stdout = '';
       let stderr = '';
 
-      proc.stdout?.on('data', (data) => {
+      proc.stdout?.on('data', (data: Buffer) => {
         stdout += data.toString();
       });
 
-      proc.stderr?.on('data', (data) => {
+      proc.stderr?.on('data', (data: Buffer) => {
         stderr += data.toString();
       });
 
       proc.on('close', async (exitCode) => {
         if (exitCode !== 0) {
-          // Save both stderr and stdout for debugging
+          const combinedOutput = (stderr + stdout).toLowerCase();
+          const isRetryable =
+            combinedOutput.includes('rate limit') ||
+            combinedOutput.includes('rate_limit') ||
+            combinedOutput.includes('429') ||
+            combinedOutput.includes('529') ||
+            combinedOutput.includes('overloaded') ||
+            combinedOutput.includes('econnreset') ||
+            combinedOutput.includes('epipe') ||
+            combinedOutput.includes('etimedout');
+
+          if (isRetryable) {
+            // Reject so withRetry catches and retries
+            const err = new Error(
+              `rate limit: Claude CLI exited with code ${exitCode}: ${(stderr || stdout).substring(0, 300)}`,
+            );
+            reject(err);
+            return;
+          }
+
+          // Non-retryable failure — save debug info and resolve with failure
           const stderrFile = path.join(this.tasksDir, `${taskId}-stderr.txt`);
           const stdoutDebugFile = path.join(this.tasksDir, `${taskId}-stdout-debug.txt`);
           await fs.writeFile(stderrFile, stderr || '(empty)');
@@ -365,6 +450,12 @@ export class ClaudeExecutor {
       });
 
       proc.on('error', (error) => {
+        // Spawn-level errors — check if retryable (e.g. ECONNRESET)
+        const kind = classifyError(error);
+        if (kind === 'connection' || kind === 'timeout') {
+          reject(error);
+          return;
+        }
         resolve({
           success: false,
           output: null,

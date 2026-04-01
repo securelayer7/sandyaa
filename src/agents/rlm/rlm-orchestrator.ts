@@ -1,6 +1,7 @@
 import { RLMConfig, TurnResult, CompletionStatus, RLMResult } from './rlm-types.js';
 import { PythonREPLManager } from './python-repl-manager.js';
 import { ClaudeExecutor } from '../agent-executor.js';
+import { ContextCompactor } from '../../utils/context-compactor.js';
 
 /**
  * Orchestrates multi-turn RLM interaction between Claude and Python REPL
@@ -9,10 +10,12 @@ import { ClaudeExecutor } from '../agent-executor.js';
 export class RLMOrchestrator {
   private config: RLMConfig;
   private executor: ClaudeExecutor;
+  private compactor: ContextCompactor;
 
   constructor(config: RLMConfig, executor: ClaudeExecutor) {
     this.config = config;
     this.executor = executor;
+    this.compactor = new ContextCompactor();
   }
 
   /**
@@ -187,16 +190,14 @@ export class RLMOrchestrator {
         conversationHistory += `\n<system_reminder>\nPlease write Python code to continue the analysis. Remember to call FINAL() when done.\n</system_reminder>\n`;
       }
 
-      // Truncate conversation history if too long (keep initial prompt + recent turns)
-      const maxHistoryChars = 400_000; // ~100K tokens
-      if (conversationHistory.length > maxHistoryChars) {
-        const initialPromptEnd = conversationHistory.indexOf('</assistant_response>');
-        if (initialPromptEnd > 0) {
-          const initialPrompt = conversationHistory.substring(0, initialPromptEnd);
-          const recentHistory = conversationHistory.substring(conversationHistory.length - maxHistoryChars * 0.6);
-          conversationHistory = initialPrompt + '\n\n<system_note>Earlier turns truncated for context limits.</system_note>\n\n' + recentHistory;
-          console.log(`      (conversation history truncated to fit context window)`);
-        }
+      // Smart context compaction — apply micro-compact first, then escalate
+      const maxHistoryTokens = 100_000; // ~400K chars
+      const currentTokens = this.compactor.estimateTokens(conversationHistory);
+      if (currentTokens > maxHistoryTokens) {
+        const { text, strategy } = this.compactor.compactConversation(conversationHistory, maxHistoryTokens);
+        const newTokens = this.compactor.estimateTokens(text);
+        conversationHistory = text;
+        console.log(`      (context compacted via "${strategy}": ${currentTokens} → ${newTokens} tokens)`);
       }
 
       // Check for timeout

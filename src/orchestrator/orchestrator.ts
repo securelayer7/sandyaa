@@ -11,6 +11,7 @@ import { BlastRadiusCalculator } from '../analyzer/blast-radius.js';
 import { FilePrioritizer } from '../utils/file-prioritizer.js';
 import { DynamicChunker } from '../utils/dynamic-chunker.js';
 import { getDefaultContextWindow, autoResolveGeminiModels } from '../utils/model-registry.js';
+import { hooks, HookType } from '../utils/hooks.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import * as path from 'path';
@@ -187,6 +188,9 @@ export class Orchestrator {
     console.log(chalk.cyan('Target:'), targetPath);
     console.log(chalk.cyan('Mode:'), this.config.loop.mode);
     console.log();
+
+    // Emit ScanStart hook
+    hooks.emit(HookType.ScanStart, { targetPath, config: this.config });
 
     // Set target path on all executors so Claude CLI runs in the target directory
     // This prevents Claude from seeing/analyzing Sandyaa's own source code
@@ -482,6 +486,7 @@ export class Orchestrator {
 
           // ALWAYS add to findings list - NEVER discard
           allFindings.push(vuln);
+          hooks.emit(HookType.FindingDetected, vuln);
         }
 
         // Count findings by status
@@ -729,6 +734,14 @@ export class Orchestrator {
 
     // Generate summary report
     await this.reporter.generateSummary(totalBugsFound, files.length, duration);
+
+    // Emit ScanComplete hook
+    hooks.emit(HookType.ScanComplete, {
+      totalBugs: totalBugsFound,
+      filesAnalyzed: files.length,
+      duration,
+      findingsDir: this.config.output.findings_dir,
+    });
 
     // Cleanup cloned repository if configured
     if (this.clonedRepoPath && this.config.git.cleanup) {
