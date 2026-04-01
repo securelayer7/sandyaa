@@ -487,6 +487,11 @@ export class ClaudeExecutor {
           continue;
         }
 
+        // Skip rate limit events (CLI metadata, not assistant content)
+        if (json.type === 'rate_limit_event') {
+          continue;
+        }
+
         // Look for assistant message with actual response
         if (json.type === 'assistant' && json.message?.content) {
           const content = json.message.content;
@@ -533,7 +538,7 @@ export class ClaudeExecutor {
           try {
             const json = JSON.parse(line);
             // Reject CLI metadata
-            return !(json.type === 'system' || json.type === 'result' || json.type === 'assistant');
+            return !(json.type === 'system' || json.type === 'result' || json.type === 'assistant' || json.type === 'rate_limit_event');
           } catch {
             return true;
           }

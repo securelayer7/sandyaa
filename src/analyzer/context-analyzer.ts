@@ -260,6 +260,8 @@ export class ContextAnalyzer {
     if (validFiles.length < safeFiles.length) {
       const skipped = safeFiles.length - validFiles.length;
       console.log(chalk.gray(`    ✓ Validated ${validFiles.length} files (${skipped} skipped - not at target path)`));
+    } else {
+      console.log(chalk.gray(`    ✓ All ${validFiles.length} files validated`));
     }
 
     // Phase 0.5: Code filtering (RLM Phase 1 - Pattern-based reduction)
@@ -278,7 +280,7 @@ export class ContextAnalyzer {
         ...(minScore <= 1 ? filterResult.mediumPriority : [])
       ];
 
-      if (filtered.length < validFiles.length) {
+      if (filtered.length > 0 && filtered.length < validFiles.length) {
         // Map back to absolute paths and relative paths
         const filteredPaths = new Set(filtered.map(f => f.path));
         const indices = validFiles
@@ -310,9 +312,28 @@ export class ContextAnalyzer {
         if (topPatterns) {
           console.log(chalk.gray(`    Patterns: ${topPatterns}`));
         }
+      } else if (filtered.length === 0) {
+        // No files matched security patterns — keep ALL files to avoid empty analysis
+        console.log(chalk.yellow(`    ⚠ No files matched security patterns, analyzing all ${validFiles.length} files`));
       } else {
         console.log(chalk.gray(`    All files appear security-relevant (no filtering needed)`));
       }
+    }
+
+    // Safety check: if no files remain after filtering/validation, return empty context
+    if (filesToAnalyze.length === 0) {
+      console.log(chalk.yellow(`    ⚠ No files to analyze after filtering — skipping chunk`));
+      return {
+        context: {
+          files: [],
+          entryPoints: [],
+          dataFlows: [],
+          trustBoundaries: [],
+          assumptions: [],
+          facts: []
+        },
+        tokensUsed: 0
+      };
     }
 
     // Phase 1: Let Claude decide what analyses are needed for this chunk
