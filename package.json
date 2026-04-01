@@ -1,0 +1,45 @@
+{
+  "name": "sandyaa",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Autonomous security bug hunter - real exploits, no hallucination",
+  "main": "dist/index.js",
+  "bin": {
+    "sandyaa": "./bin/sandyaa.js"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "sandyaa": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "security",
+    "vulnerability",
+    "exploit",
+    "poc",
+    "bug-hunting"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "glob": "^10.3.10",
+    "node-fetch": "^3.3.2",
+    "ora": "^8.0.1",
+    "uuid": "^9.0.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

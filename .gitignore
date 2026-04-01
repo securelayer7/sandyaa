@@ -1,0 +1,34 @@
+node_modules/
+dist/
+findings/
+.sandyaa/
+*.log
+*.bak
+.env
+.DS_Store
+/tmp/
+
+# Analysis output files (generated, not source)
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+analysis-output/
+reports/
+security-analysis/
+test-samples/
+examples/
+
+# Generated reports
+*-report.json
+*-analysis.json
+*-findings.json
+blast-radius*.json
+blast_radius*.json
+poc_responses.txt
+
+# Shell scripts (deployment specific)
+sandyaa.sh
+setup.sh
+process-task.sh
+test-cursor*.js
