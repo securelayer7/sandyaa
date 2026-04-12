@@ -12,6 +12,7 @@ import { FilePrioritizer } from '../utils/file-prioritizer.js';
 import { DynamicChunker } from '../utils/dynamic-chunker.js';
 import { getDefaultContextWindow, autoResolveGeminiModels } from '../utils/model-registry.js';
 import { hooks, HookType } from '../utils/hooks.js';
+import { DashboardRenderer } from '../ui/Dashboard.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import * as path from 'path';
@@ -120,6 +121,7 @@ export class Orchestrator {
   private filePrioritizer?: FilePrioritizer;
   private dynamicChunker: DynamicChunker;
   private executor: any;  // Will hold ClaudeExecutor reference for RLM summary
+  private dashboard: DashboardRenderer;
 
   constructor(config: Config) {
     this.config = config;
@@ -147,6 +149,7 @@ export class Orchestrator {
     };
     this.recursiveEngine = new RecursiveStrategyEngine(recursiveConfig);
     this.gitHelper = new GitHelper();
+    this.dashboard = new DashboardRenderer();
   }
 
   private getCheckpointFile(targetPath: string): string {
@@ -275,6 +278,14 @@ export class Orchestrator {
 
     console.log(chalk.cyan(`Files to process: ${filesToProcess.length}\n`));
 
+    // Start the dashboard UI (console fallback — Ink is opt-in)
+    await this.dashboard.start(targetPath);
+    this.dashboard.update({
+      phase: 'mapping',
+      progress: { current: 0, total: Math.ceil(filesToProcess.length / (this.config.analysis.chunk_size || 15)) },
+      tokenBudget: getDefaultContextWindow(),
+    });
+
     // Smart target selection for large codebases
     let prioritizedFiles: string[] = [];
     let phase = 'high-priority';
@@ -316,6 +327,14 @@ export class Orchestrator {
       console.log(chalk.bold(`\n[${phase}] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
       console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));
 
+      // Update dashboard
+      this.dashboard.update({
+        phase: 'chunking',
+        progress: { current: iteration, total: Math.ceil(filesToProcess.length / chunkSize) },
+        currentFile: chunk[0] ? path.basename(chunk[0]) : '',
+      });
+      this.dashboard.addActivity(`Chunk ${iteration}: analyzing ${chunk.length} files`);
+
       const chunkStartTime = Date.now();
 
       // Phase 1: Deep Context Building with intelligent planning
@@ -342,8 +361,20 @@ export class Orchestrator {
       let vulnerabilities = await this.detector.detect(context);
       const detectionTokens = this.totalTokensUsed - detectionStartTokens;
 
+      // Update dashboard with detection results
+      this.dashboard.update({
+        phase: 'vulnerability-detection',
+        tokensUsed: this.totalTokensUsed,
+      });
+
       if (vulnerabilities.length > 0) {
         console.log(chalk.green(`    ✓ Found ${vulnerabilities.length} potential vulnerabilities | ${detectionTokens.toLocaleString()} tokens`));
+
+        // Feed findings to dashboard
+        for (const v of vulnerabilities) {
+          const sev = (v.severity?.toLowerCase() || 'low') as 'critical' | 'high' | 'medium' | 'low';
+          this.dashboard.addFinding(sev, `${v.type} at ${v.location?.file?.split('/').pop() || 'unknown'}`);
+        }
 
         // Show sample of what was found (Claude decides what's important)
         const sample = vulnerabilities.slice(0, 3);
@@ -362,6 +393,7 @@ export class Orchestrator {
 
       // Phase 2.5: Recursive Analysis (if enabled)
       if (this.config.recursive.enabled && vulnerabilities.length > 0) {
+        this.dashboard.update({ phase: 'validation' });
         console.log(chalk.cyan(`\n  → Recursive verification: tracing call chains, checking contradictions...`));
         const recursiveStartTokens = this.totalTokensUsed;
         const enhanced = await this.recursiveEngine.apply(vulnerabilities, context);
@@ -438,6 +470,7 @@ export class Orchestrator {
 
       if (vulnerabilities.length > 0) {
         // Phase 3: POC Generation + Validation
+        this.dashboard.update({ phase: 'poc-generation' });
         console.log(chalk.cyan(`  Generating and validating POCs for ${vulnerabilities.length} vulnerabilit${vulnerabilities.length !== 1 ? 'ies' : 'y'}...`));
         const allFindings: any[] = [];  // KEEP EVERYTHING
 
@@ -715,6 +748,11 @@ export class Orchestrator {
         }
       }
     }
+
+    // Stop dashboard
+    this.dashboard.update({ phase: 'reporting', tokensUsed: this.totalTokensUsed });
+    this.dashboard.addActivity(`Scan complete: ${totalBugsFound} findings`);
+    this.dashboard.stop();
 
     // Final summary
     const duration = ((Date.now() - startTime) / 1000 / 60).toFixed(2);

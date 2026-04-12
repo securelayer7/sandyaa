@@ -32,3 +32,9 @@ sandyaa.sh
 setup.sh
 process-task.sh
 test-cursor*.js
+
+# Root-level scratch notes and generated scan reports
+# Keep README.md and LICENSE at the root; all other top-level .md files
+# are working notes and should not be committed.
+/*.md
+!/README.md
