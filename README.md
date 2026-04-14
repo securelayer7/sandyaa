@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Sandyaa CLI banner" width="560">
+</p>
+
 # Sandyaa
 
 Autonomous source code audit. Point it at a local directory or a git URL and Sandyaa runs end-to-end until the audit is done — no pausing, no interactive prompts. It builds context, detects vulnerabilities, writes exploitable proof-of-concepts for each finding, and emits a folder of reports. Driven by Claude (and optionally Gemini).

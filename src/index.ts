@@ -10,6 +10,51 @@ import { ClaudeExecutor } from './agents/agent-executor.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const BRAND = '#FF8C00';
+const VERSION = '1.0.0';
+
+function printBanner(target: string): void {
+  const orange = chalk.hex(BRAND);
+  const dim = chalk.gray;
+  const INNER = 52;
+
+  const pad = (s: string): string => {
+    const max = INNER - 2;
+    const visible = s.length > max ? '…' + s.slice(-(max - 1)) : s;
+    return ' ' + visible + ' '.repeat(max - visible.length) + ' ';
+  };
+
+  const border = (ch: string) => orange(ch);
+  const top = border('╭' + '─'.repeat(INNER) + '╮');
+  const bot = border('╰' + '─'.repeat(INNER) + '╯');
+  const blank = border('│') + ' '.repeat(INNER) + border('│');
+  const row = (text: string, color: (s: string) => string = (s) => s) =>
+    border('│') + color(pad(text)) + border('│');
+
+  const wordmark = [
+    '  ███████╗ █████╗ ███╗   ██╗██████╗ ██╗   ██╗ █████╗  █████╗ ',
+    '  ██╔════╝██╔══██╗████╗  ██║██╔══██╗╚██╗ ██╔╝██╔══██╗██╔══██╗',
+    '  ███████╗███████║██╔██╗ ██║██║  ██║ ╚████╔╝ ███████║███████║',
+    '  ╚════██║██╔══██║██║╚██╗██║██║  ██║  ╚██╔╝  ██╔══██║██╔══██║',
+    '  ███████║██║  ██║██║ ╚████║██████╔╝   ██║   ██║  ██║██║  ██║',
+    '  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝',
+  ];
+
+  console.log();
+  for (const line of wordmark) console.log(orange(line));
+  console.log();
+  console.log(top);
+  console.log(row('✵ Welcome to Sandyaa', orange));
+  console.log(blank);
+  console.log(row('  Autonomous security bug hunter', (s) => s));
+  console.log(row('  no API key  ·  powered by Claude Code', dim));
+  console.log(blank);
+  console.log(row('  target: ' + target, dim));
+  console.log(row('  v' + VERSION, dim));
+  console.log(bot);
+  console.log();
+}
+
 const program = new Command();
 
 program
@@ -21,7 +66,7 @@ program
   .option('--fresh', 'Start fresh analysis, ignore existing checkpoint')
   .action(async (target: string, options) => {
     try {
-      console.log(chalk.bold.cyan('\nSandyaa - Autonomous Bug Hunter\n'));
+      printBanner(target);
 
       // Validate target is provided
       if (!target || target.trim() === '') {
