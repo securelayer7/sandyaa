@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import { ModelExecutor, ProviderConfig } from '../agents/model-executor.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import chalk from 'chalk';
 
 export interface SecurityFix {
@@ -415,7 +416,6 @@ export class GitHistoryAnalyzer {
 
   private getCheckpointFile(targetPath: string): string {
     // Use absolute path hash for unique checkpoint per project
-    const crypto = require('crypto');
     const hash = crypto.createHash('sha256')
       .update(path.resolve(targetPath))
       .digest('hex')
