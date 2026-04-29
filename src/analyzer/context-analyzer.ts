@@ -8,9 +8,25 @@ import { AnalysisPlanner } from './analysis-planner.js';
 import { PathResolver } from '../utils/path-resolver.js';
 import { LightweightCodeFilter } from '../utils/code-filter.js';
 import * as fs from 'fs/promises';
+import { realpathSync } from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import chalk from 'chalk';
+
+/**
+ * Resolve a path to its canonical (symlink-followed) form when possible.
+ * Falls back to `path.resolve()` if the file doesn't exist on disk yet —
+ * boundary checks are also called against globbed paths that may have
+ * been removed between scan and analysis.
+ */
+function canonicalize(p: string): string {
+  const resolved = path.resolve(p);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,9 +103,11 @@ export class ContextAnalyzer {
     this.pathResolver = new PathResolver(config.target.path);
     this.codeFilter = new LightweightCodeFilter();
 
-    // Cache boundary paths for fast validation
-    this.targetPathResolved = path.resolve(config.target.path);
-    this.sandyaaPath = path.resolve(__dirname, '../..');
+    // Cache boundary paths for fast validation. Use the canonical
+    // (symlink-resolved) form so the boundary holds even when the target,
+    // its parents, or its children are reached via symlink.
+    this.targetPathResolved = canonicalize(config.target.path);
+    this.sandyaaPath = canonicalize(path.resolve(__dirname, '../..'));
   }
 
   /**
@@ -97,15 +115,26 @@ export class ContextAnalyzer {
    * Prevent analyzing Sandyaa's own code, generated POCs, findings, etc.
    */
   private isWithinTargetBoundary(filePath: string): boolean {
-    const resolved = path.resolve(filePath);
+    // Resolve symlinks so a file inside the target that points outside is
+    // rejected. `canonicalize()` falls back to a non-followed resolve when
+    // the file does not exist, preserving prior behavior for stale paths.
+    const resolved = canonicalize(filePath);
 
-    // Must be within target
-    if (!resolved.startsWith(this.targetPathResolved)) {
+    // Must be within target. Use `path.relative()` rather than a string
+    // `startsWith` so that `target = "/foo"` does not accept `/foobar/x`.
+    const relToTarget = path.relative(this.targetPathResolved, resolved);
+    if (relToTarget === '..' ||
+        relToTarget.startsWith('..' + path.sep) ||
+        path.isAbsolute(relToTarget)) {
       return false;
     }
 
-    // Must NOT be Sandyaa framework source code
-    if (resolved.startsWith(this.sandyaaPath)) {
+    // Must NOT be Sandyaa framework source code (use the same boundary
+    // semantics — relative path that does not escape).
+    const relToSandyaa = path.relative(this.sandyaaPath, resolved);
+    if (relToSandyaa !== '..' &&
+        !relToSandyaa.startsWith('..' + path.sep) &&
+        !path.isAbsolute(relToSandyaa)) {
       return false;
     }
 
