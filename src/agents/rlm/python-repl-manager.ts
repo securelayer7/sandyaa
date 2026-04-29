@@ -378,6 +378,24 @@ print("✓ Tool functions registered: read_file_range, search_pattern, llm_query
       return JSON.stringify({ error: 'Codebase not loaded' });
     }
 
+    // Bounds against catastrophic backtracking. JavaScript's RegExp is not
+    // interruptible, so a pattern like `(a+)+b` against a long input line
+    // can stall the event loop for an unbounded time. Until/unless we adopt
+    // a linear-time engine (e.g. re2), apply soft caps:
+    //
+    //   - reject lines longer than MAX_LINE_BYTES so a 10MB minified file
+    //     doesn't become a single super-long line that amplifies a bad
+    //     pattern,
+    //   - check a wall-clock deadline between lines so a runaway match on
+    //     one file cannot keep the loop pinned forever.
+    //
+    // These are best-effort: a single line under MAX_LINE_BYTES with a
+    // nested-quantifier pattern can still hang `regex.test()` for that one
+    // call. The deadline check stops us from compounding the damage.
+    const MAX_LINE_BYTES = 64 * 1024;     // 64KB
+    const DEADLINE_MS = 10_000;            // 10s total wall budget
+    const startedAt = Date.now();
+
     try {
       const regex = new RegExp(pattern, 'gm');
       const results: any[] = [];
@@ -387,12 +405,24 @@ print("✓ Tool functions registered: read_file_range, search_pattern, llm_query
         ? this.codebaseContext.files.filter(f => files.includes(f.path))
         : this.codebaseContext.files;
 
+      let timedOut = false;
+      let skippedLongLines = 0;
+
+      outer:
       for (const file of filesToSearch) {
         try {
           const content = await fs.readFile(file.path, 'utf-8');
           const lines = content.split('\n');
 
-          lines.forEach((line, index) => {
+          for (let index = 0; index < lines.length; index++) {
+            const line = lines[index];
+            if (line.length > MAX_LINE_BYTES) {
+              skippedLongLines++;
+              continue;
+            }
+            // Reset lastIndex defensively — `g` flag carries state across
+            // `test()` calls on the same regex instance.
+            regex.lastIndex = 0;
             if (regex.test(line)) {
               results.push({
                 file: file.path,
@@ -401,7 +431,13 @@ print("✓ Tool functions registered: read_file_range, search_pattern, llm_query
                 language: file.language
               });
             }
-          });
+            // Cheap deadline check (every 256 lines) keeps overhead low
+            // while still bounding total wall time.
+            if ((index & 0xff) === 0 && Date.now() - startedAt > DEADLINE_MS) {
+              timedOut = true;
+              break outer;
+            }
+          }
         } catch (error) {
           // Skip files that can't be read
           continue;
@@ -412,7 +448,9 @@ print("✓ Tool functions registered: read_file_range, search_pattern, llm_query
         pattern,
         matches: results.length,
         results: results.slice(0, 100),  // Limit to 100 matches to prevent overwhelming output
-        truncated: results.length > 100
+        truncated: results.length > 100,
+        timedOut,
+        skippedLongLines
       });
     } catch (error) {
       return JSON.stringify({ error: `Invalid regex pattern: ${error}` });
