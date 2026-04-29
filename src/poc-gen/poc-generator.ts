@@ -109,9 +109,11 @@ export class POCGenerator {
           stdio: 'pipe'
         });
 
-        // Check if output indicates success
-        // This is a basic check - could be more sophisticated
-        return output.length > 0 || true;
+        // POC ran to completion (exit 0) within the timeout. We additionally
+        // require non-empty stdout as a coarse "the script actually did
+        // something" signal — exploit-specific success signalling is the
+        // caller's job.
+        return output.length > 0;
 
       } catch (execError) {
         // POC failed to run or timed out
