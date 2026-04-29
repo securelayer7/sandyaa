@@ -319,10 +319,28 @@ print("✓ Tool functions registered: read_file_range, search_pattern, llm_query
       return JSON.stringify({ error: 'Codebase not loaded' });
     }
 
-    // Find file in context
-    const file = this.codebaseContext.files.find(f =>
-      f.path === path || f.path.endsWith(path)
-    );
+    // Resolve `path` against the loaded context. Prefer an exact match; if
+    // none, allow a relative-suffix match but require the suffix to start at
+    // a path-component boundary so `passwd` cannot match `myfile-passwd` and
+    // `config.c` cannot match `oldconfig.c`. If more than one path-boundary
+    // suffix candidate exists, surface the ambiguity instead of silently
+    // returning the first one (which depends on `Array#find` ordering and
+    // can yield the wrong file).
+    const exact = this.codebaseContext.files.find(f => f.path === path);
+    let file = exact;
+    if (!file) {
+      const candidates = this.codebaseContext.files.filter(
+        f => f.path.endsWith('/' + path)
+      );
+      if (candidates.length === 1) {
+        file = candidates[0];
+      } else if (candidates.length > 1) {
+        return JSON.stringify({
+          error: `Ambiguous path '${path}' matches ${candidates.length} files`,
+          candidates: candidates.slice(0, 10).map(f => f.path)
+        });
+      }
+    }
 
     if (!file) {
       return JSON.stringify({ error: `File not found: ${path}` });
