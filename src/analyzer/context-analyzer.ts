@@ -450,30 +450,23 @@ export class ContextAnalyzer {
       let strategyFilesRelative = validRelativeFiles;
 
       if (strategy.targetFiles && strategy.targetFiles.length > 0) {
-        // Filter out hallucinated Sandyaa paths (Claude sometimes analyzes the tool instead of target)
-        const sandyaaPatterns = [
-          'src/agents/', 'src/utils/', 'src/poc-gen/', 'src/recursive/',
-          'src/analyzer/', 'src/detector/', 'src/reporter/', 'src/orchestrator/',
-          'agent-executor', 'git-helper', 'poc-generator', 'recursive-strategy',
-          'context-analyzer', 'vulnerability-detector'
-        ];
-
+        // Reject paths that, once resolved against the target, escape the
+        // target tree or land inside Sandyaa's own source. This replaces
+        // the previous name-pattern reject which also discarded every
+        // `src/**/*.ts` file — a fatal false positive on any TypeScript
+        // target (e.g. umami, Next.js apps), since legitimate target
+        // files like `src/lib/auth.ts` were rejected as "Sandyaa's code".
         const validTargetFiles = strategy.targetFiles.filter(tf => {
-          // Check if it's a Sandyaa path
-          const isSandyaaPath = sandyaaPatterns.some(pattern => tf.includes(pattern)) ||
-                               (tf.startsWith('src/') && tf.includes('.ts'));
-
-          if (isSandyaaPath) {
-            console.log(chalk.red(`    [REJECTED] hallucinated path: ${tf}`));
-            console.log(chalk.red(`       This is Sandyaa's own code, NOT the target application!`));
+          const absolute = this.pathResolver.toAbsolute(tf);
+          if (!this.isWithinTargetBoundary(absolute)) {
+            console.log(chalk.red(`    [REJECTED] path escapes target or hits Sandyaa: ${tf}`));
             return false;
           }
           return true;
         });
 
         if (validTargetFiles.length === 0) {
-          console.log(chalk.red(`    [ERROR] ALL target files were Sandyaa paths - Claude analyzed wrong codebase!`));
-          console.log(chalk.yellow(`    [WARNING] Using original file list from target application`));
+          console.log(chalk.red(`    [ERROR] ALL target files were out-of-boundary — falling back to chunk file list`));
         }
 
         // Claude often returns paths without full prefixes (e.g., "airflow/models/dagbag.py" instead of "airflow-core/src/airflow/models/dagbag.py")
