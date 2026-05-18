@@ -431,6 +431,19 @@ export class ClaudeExecutor {
             (ClaudeExecutor.tokensByTask.get(taskType) || 0) + tokensUsed
           );
 
+          // parseResponse returns null on total failure (e.g. truncated JSON).
+          // Surface that as a real error so callers see a useful message
+          // instead of `Context analysis failed: undefined`.
+          if (parsed === null) {
+            resolve({
+              success: false,
+              output: null,
+              tokensUsed,
+              error: `Could not parse model response as JSON (likely truncated or non-JSON output). Raw stream saved to ${rawFile}.`
+            });
+            return;
+          }
+
           resolve({
             success: true,
             output: parsed,
@@ -690,87 +703,147 @@ export class ClaudeExecutor {
   }
 
   private parseResponse(text: string): any {
-    // First, try to extract JSON from markdown code blocks
+    // 1. Closed markdown code block: ```json ... ```
     const codeBlockMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
     if (codeBlockMatch) {
-      try {
-        const parsed = JSON.parse(codeBlockMatch[1]);
-        return parsed;
-      } catch (e) {
-        // Silently continue to other parsing methods
-        // (Model sometimes adds markdown before JSON - fallback parser handles it)
+      const parsed = this.tryParseJson(codeBlockMatch[1]);
+      if (parsed !== undefined) return parsed;
+    }
+
+    // 2. UNCLOSED code block (response truncated mid-JSON, no closing fence).
+    //    Take everything after the opening fence and try string-aware extraction
+    //    + repair below.
+    const openFenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*)$/);
+    const candidates: string[] = [];
+    if (openFenceMatch) candidates.push(openFenceMatch[1]);
+    candidates.push(text);
+
+    for (const candidate of candidates) {
+      // 3. String-aware scan for the first top-level balanced { ... }.
+      //    Unlike the per-line brace counter this version ignores braces
+      //    inside string literals and does not latch onto an inner object
+      //    just because its line happens to start with `{`.
+      const extracted = this.extractTopLevelJson(candidate);
+      if (extracted) {
+        const parsed = this.tryParseJson(extracted);
+        if (parsed !== undefined) return parsed;
+      }
+
+      // 4. Repair attempt: response was truncated mid-JSON. Close any
+      //    unterminated string / array / object based on the running state.
+      const repaired = this.repairTruncatedJson(candidate);
+      if (repaired) {
+        const parsed = this.tryParseJson(repaired);
+        if (parsed !== undefined) return parsed;
       }
     }
 
-    // Look for JSON objects more carefully - find balanced braces
-    // Skip over file contents with line numbers (like "38→C...")
-    const lines = text.split('\n');
-    let jsonStart = -1;
-    let jsonEnd = -1;
-    let braceDepth = 0;
-    let inJsonObject = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-
-      // Skip lines that look like file contents (have line numbers with arrows)
-      if (/^\d+→/.test(line)) {
-        continue;
-      }
-
-      // Look for start of JSON object
-      if (!inJsonObject && line.startsWith('{')) {
-        jsonStart = i;
-        inJsonObject = true;
-        braceDepth = 0;
-      }
-
-      if (inJsonObject) {
-        // Count braces
-        for (const char of line) {
-          if (char === '{') braceDepth++;
-          if (char === '}') braceDepth--;
-        }
-
-        // Found complete JSON object
-        if (braceDepth === 0 && line.includes('}')) {
-          jsonEnd = i;
-          break;
-        }
-      }
-    }
-
-    // Try to parse the extracted JSON
-    if (jsonStart !== -1 && jsonEnd !== -1) {
-      const jsonText = lines.slice(jsonStart, jsonEnd + 1).join('\n');
-      try {
-        const parsed = JSON.parse(jsonText);
-        return parsed;
-      } catch (e) {
-        console.error('Failed to parse extracted JSON:', (e as Error).message);
-        console.error('JSON text preview:', jsonText.substring(0, 200));
-        // Continue to fallback
-      }
-    }
-
-    // Fallback: Try to find any JSON-like structure using regex
-    // But be more careful - look for objects with known fields
+    // 5. Legacy regex fallback: known top-level keys.
     const jsonObjectMatch = text.match(/\{[^]*?"(?:analyses|semanticIssues|vulnerabilities|files|components|dataFlows|patterns|prioritized|language|code|setupInstructions|memoryIssues|concurrencyIssues|type|regressed)"[^]*?\}/);
     if (jsonObjectMatch) {
-      try {
-        return JSON.parse(jsonObjectMatch[0]);
-      } catch (e) {
-        // Continue to final fallback
-      }
+      const parsed = this.tryParseJson(jsonObjectMatch[0]);
+      if (parsed !== undefined) return parsed;
     }
 
-    // Final fallback: try parsing entire text
+    // 6. Last resort: parse the whole text verbatim.
+    const wholeParsed = this.tryParseJson(text);
+    if (wholeParsed !== undefined) return wholeParsed;
+
+    console.error('All JSON parsing attempts failed. Text preview:', text.substring(0, 300));
+    return null;
+  }
+
+  private tryParseJson(s: string): any {
     try {
-      return JSON.parse(text);
-    } catch (e) {
-      // Don't throw - return null to allow higher-level fallback logic to handle it
-      // This prevents CLI metadata from being incorrectly parsed as response
-      console.error('All JSON parsing attempts failed. Text preview:', text.substring(0, 300));
+      return JSON.parse(s);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Scan text for the first top-level balanced JSON object (`{...}`),
+   * ignoring braces inside string literals and respecting `\"` escapes.
+   * Returns the matching substring or null if no balanced object exists.
+   */
+  private extractTopLevelJson(text: string): string | null {
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+
+      if (escape) { escape = false; continue; }
+      if (inString) {
+        if (ch === '\\') { escape = true; continue; }
+        if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') { inString = true; continue; }
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * If `text` looks like a JSON object that was truncated mid-stream
+   * (response cut off by max_tokens), attempt to close the open contexts
+   * so the prefix becomes parseable. Returns the repaired string or null
+   * if the input does not look like an unterminated JSON object.
+   */
+  private repairTruncatedJson(text: string): string | null {
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+    const body = text.slice(start);
+
+    const stack: Array<'{' | '['> = [];
+    let inString = false;
+    let escape = false;
+    let lastNonWs = '';
+
+    for (let i = 0; i < body.length; i++) {
+      const ch = body[i];
+
+      if (escape) { escape = false; continue; }
+      if (inString) {
+        if (ch === '\\') { escape = true; continue; }
+        if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') { inString = true; continue; }
+      if (ch === '{' || ch === '[') stack.push(ch);
+      else if (ch === '}' || ch === ']') stack.pop();
+      if (!/\s/.test(ch)) lastNonWs = ch;
+    }
+
+    if (stack.length === 0 && !inString) return null; // not truncated
+
+    let repaired = body;
+    if (inString) repaired += '"';
+    // Drop dangling trailing comma so we don't produce `[1,2,]` etc.
+    repaired = repaired.replace(/,\s*$/, '');
+    // Also drop a trailing key-without-value: `"foo":` at the very end.
+    repaired = repaired.replace(/"[^"\\]*"\s*:\s*$/, '');
+    repaired = repaired.replace(/,\s*$/, '');
+
+    while (stack.length > 0) {
+      const opener = stack.pop();
+      repaired += opener === '{' ? '}' : ']';
+    }
+
+    // Sanity: only return if it parses. Otherwise caller falls through.
+    try {
+      JSON.parse(repaired);
+      return repaired;
+    } catch {
       return null;
     }
   }

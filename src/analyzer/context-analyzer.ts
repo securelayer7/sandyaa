@@ -420,7 +420,11 @@ export class ContextAnalyzer {
         fileContents,
         focusAreas: plan.focusAreas
       },
-      maxTokens: 8000
+      // Context-building emits a JSON object containing per-function dataFlow
+      // entries for every file in the chunk. 8k tokens truncated mid-array on
+      // medium-size chunks (~44 files), producing unparseable JSON. Bump to
+      // 16k — still well within Sonnet's output limit, leaves headroom.
+      maxTokens: 16000
     });
 
     if (!baseContext.success || !baseContext.output) {
@@ -516,7 +520,9 @@ export class ContextAnalyzer {
           files: strategyFilesRelative,
           targetPath: this.config.target.path
         },
-        maxTokens: 8000
+        // Strategy outputs include per-issue evidence + remediation; 8k
+        // truncated on medium chunks. Match context-building budget.
+        maxTokens: 16000
       });
 
       if (strategyResult.success && strategyResult.output) {
