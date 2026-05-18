@@ -436,17 +436,36 @@ export class ContextAnalyzer {
       sum + (f.functions?.reduce((s2: number, fn: any) => s2 + (fn.dataFlow?.length || 0), 0) || 0), 0) || 0;
     console.log(chalk.gray(`    Found: ${fileCount} files, ${entryPoints} entry points, ${dataFlows} data flows`));
 
-    // Phase 3: Execute custom analysis strategies SEQUENTIALLY
-    const results: any[] = [];
-    const analysisTypes: string[] = [];
+    // Phase 3: Execute custom analysis strategies WITH BOUNDED CONCURRENCY.
+    // Strategies are independent of each other (the planner runs once before
+    // them and they don't read each other's findings), so we can run several
+    // at once. Each one is dominated by Claude latency (30-90s per call), so
+    // a concurrency of 4 cuts a 7-strategy chunk from ~7× to ~2× round-trips.
+    //
+    // Concurrency cap is overridable via SANDYAA_STRATEGY_CONCURRENCY (1..8)
+    // for users with strict rate limits.
+    const STRATEGY_CONCURRENCY = (() => {
+      const raw = parseInt(process.env.SANDYAA_STRATEGY_CONCURRENCY || '', 10);
+      if (Number.isFinite(raw) && raw >= 1 && raw <= 8) return raw;
+      return 4;
+    })();
 
-    // Execute each custom strategy designed by Claude
-    for (const strategy of plan.analyses) {
-      console.log(chalk.gray(`  → ${strategy.name}`));
-      console.log(chalk.gray(`    ${strategy.description.substring(0, 80)}...`));
+    type StrategyOutcome = {
+      name: string;
+      result: any | null;
+      error: string | null;
+      tokensUsed: number;
+      log: string[];
+    };
+
+    const runStrategy = async (strategy: any): Promise<StrategyOutcome> => {
+      const log: string[] = [];
+      const push = (s: string) => log.push(s);
+
+      push(chalk.gray(`  → ${strategy.name}`));
+      push(chalk.gray(`    ${strategy.description.substring(0, 80)}...`));
 
       // Resolve target files using PathResolver (handles both absolute and relative paths)
-      let strategyFiles = validFiles;
       let strategyFilesRelative = validRelativeFiles;
 
       if (strategy.targetFiles && strategy.targetFiles.length > 0) {
@@ -458,57 +477,44 @@ export class ContextAnalyzer {
           'context-analyzer', 'vulnerability-detector'
         ];
 
-        const validTargetFiles = strategy.targetFiles.filter(tf => {
-          // Check if it's a Sandyaa path
+        const validTargetFiles = strategy.targetFiles.filter((tf: string) => {
           const isSandyaaPath = sandyaaPatterns.some(pattern => tf.includes(pattern)) ||
                                (tf.startsWith('src/') && tf.includes('.ts'));
-
           if (isSandyaaPath) {
-            console.log(chalk.red(`    [REJECTED] hallucinated path: ${tf}`));
-            console.log(chalk.red(`       This is Sandyaa's own code, NOT the target application!`));
+            push(chalk.red(`    [REJECTED] hallucinated path: ${tf}`));
+            push(chalk.red(`       This is Sandyaa's own code, NOT the target application!`));
             return false;
           }
           return true;
         });
 
         if (validTargetFiles.length === 0) {
-          console.log(chalk.red(`    [ERROR] ALL target files were Sandyaa paths - Claude analyzed wrong codebase!`));
-          console.log(chalk.yellow(`    [WARNING] Using original file list from target application`));
+          push(chalk.red(`    [ERROR] ALL target files were Sandyaa paths - Claude analyzed wrong codebase!`));
+          push(chalk.yellow(`    [WARNING] Using original file list from target application`));
         }
 
-        // Claude often returns paths without full prefixes (e.g., "airflow/models/dagbag.py" instead of "airflow-core/src/airflow/models/dagbag.py")
-        // Match intelligently: if target file doesn't exist as-is, find files that end with it
         const matchedFiles: string[] = [];
-
         for (const targetFile of validTargetFiles) {
-          // Try exact match first
           const absoluteTarget = this.pathResolver.toAbsolute(targetFile);
           if (await this.pathResolver.exists(absoluteTarget)) {
             matchedFiles.push(absoluteTarget);
             continue;
           }
-
-          // Try suffix match: find files from validFiles that end with the target path
-          const normalized = targetFile.replace(/^\/+/, ''); // Remove leading slashes
+          const normalized = targetFile.replace(/^\/+/, '');
           const match = validFiles.find(f => {
             const relativePath = this.pathResolver.toRelative(f);
             return relativePath.endsWith(normalized) || relativePath === normalized;
           });
-
-          if (match) {
-            matchedFiles.push(match);
-          }
+          if (match) matchedFiles.push(match);
         }
 
         if (matchedFiles.length > 0) {
-          strategyFiles = matchedFiles;
           strategyFilesRelative = matchedFiles.map(f => this.pathResolver.toRelative(f));
         } else {
-          console.log(chalk.yellow(`    ⚠ Target files don't exist, using original file list instead`));
+          push(chalk.yellow(`    ⚠ Target files don't exist, using original file list instead`));
         }
       }
 
-      // Pass the custom strategy to Claude for autonomous execution (send relative paths)
       const strategyResult = await this.executor.execute({
         type: 'custom-security-analysis',
         input: {
@@ -519,16 +525,12 @@ export class ContextAnalyzer {
         maxTokens: 8000
       });
 
-      if (strategyResult.success && strategyResult.output) {
-        results.push(strategyResult.output);
-        analysisTypes.push(strategy.name);
+      const tokensUsed = strategyResult.tokensUsed || 0;
 
-        // Show what was found
+      if (strategyResult.success && strategyResult.output) {
         const issues = strategyResult.output.issues || strategyResult.output.vulnerabilities || [];
         if (issues.length > 0) {
-          console.log(chalk.yellow(`    Found ${issues.length} issue${issues.length !== 1 ? 's' : ''}:`));
-
-          // Show first 3 issues with type and location
+          push(chalk.yellow(`    Found ${issues.length} issue${issues.length !== 1 ? 's' : ''}:`));
           const samplesToShow = Math.min(3, issues.length);
           for (let i = 0; i < samplesToShow; i++) {
             const issue = issues[i];
@@ -537,22 +539,46 @@ export class ContextAnalyzer {
               ? `${issue.location.file?.split('/').pop() || issue.location.file || 'unknown'}:${issue.location.line || '?'}`
               : 'unknown location';
             const severity = issue.severity ? `[${issue.severity.toUpperCase()}]` : '';
-
-            console.log(chalk.gray(`      ${severity} ${issueType} at ${location}`));
+            push(chalk.gray(`      ${severity} ${issueType} at ${location}`));
           }
-
-          if (issues.length > 3) {
-            console.log(chalk.gray(`      ... and ${issues.length - 3} more`));
-          }
+          if (issues.length > 3) push(chalk.gray(`      ... and ${issues.length - 3} more`));
         } else {
-          console.log(chalk.gray(`    No issues detected`));
+          push(chalk.gray(`    No issues detected`));
         }
-      } else {
-        console.log(chalk.yellow(`    Analysis failed: ${strategyResult.error}`));
+        return { name: strategy.name, result: strategyResult.output, error: null, tokensUsed, log };
       }
 
-      totalTokens += strategyResult.tokensUsed || 0;
-    }
+      push(chalk.yellow(`    Analysis failed: ${strategyResult.error}`));
+      return { name: strategy.name, result: null, error: strategyResult.error || 'unknown', tokensUsed, log };
+    };
+
+    // Bounded-concurrency runner. Flush each strategy's buffered log as it
+    // completes, in completion order, so the user still sees progress live
+    // rather than a silent wait followed by a wall of text.
+    console.log(chalk.gray(
+      `  Running ${plan.analyses.length} strategies with concurrency=${STRATEGY_CONCURRENCY}...`
+    ));
+
+    const results: any[] = [];
+    const analysisTypes: string[] = [];
+    let cursor = 0;
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= plan.analyses.length) return;
+        const outcome = await runStrategy(plan.analyses[idx]);
+        for (const line of outcome.log) console.log(line);
+        totalTokens += outcome.tokensUsed;
+        if (outcome.result !== null) {
+          results.push(outcome.result);
+          analysisTypes.push(outcome.name);
+        }
+      }
+    };
+
+    const workerCount = Math.min(STRATEGY_CONCURRENCY, plan.analyses.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
     // Still run git history analysis if it's a git repo (universal)
     // BUT skip for large repos (>5000 files) to avoid timeout issues
