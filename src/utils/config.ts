@@ -87,13 +87,24 @@ export async function loadConfig(configPath?: string): Promise<Config> {
   }
 
   try {
+    await fs.access(configPath);
+  } catch {
+    // Config is optional — running with built-in defaults is the normal path.
+    // Don't emit a "Failed to load..." message that reads like an error.
+    return DEFAULT_CONFIG;
+  }
+
+  try {
     const content = await fs.readFile(configPath, 'utf-8');
     const loaded = YAML.parse(content);
 
     // Merge with defaults
     return deepMerge(DEFAULT_CONFIG, loaded);
   } catch (error) {
-    console.warn(`Failed to load config from ${configPath}, using defaults`);
+    // File exists but is unreadable or malformed — that IS worth telling the
+    // user about, because they intentionally created it.
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠ Could not parse ${configPath} (${reason}); falling back to defaults.`);
     return DEFAULT_CONFIG;
   }
 }

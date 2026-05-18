@@ -64,6 +64,12 @@ program
   .argument('<target>', 'Path to target codebase or git URL')
   .option('-c, --config <path>', 'Path to config file', '.sandyaa/config.yaml')
   .option('--fresh', 'Start fresh analysis, ignore existing checkpoint')
+  .option(
+    '-m, --model <tier>',
+    'Pin every Claude task to a specific model (haiku|sonnet|opus). ' +
+    'Overrides the dynamic complexity-based selector and config.provider.models.claude. ' +
+    'Use `opus` to take advantage of the 1M context window.'
+  )
   .action(async (target: string, options) => {
     try {
       printBanner(target);
@@ -78,8 +84,34 @@ program
         process.exit(1);
       }
 
+      // Validate --model early so a typo doesn't waste a setup pass.
+      const VALID_MODELS = ['haiku', 'sonnet', 'opus'] as const;
+      type ModelTier = typeof VALID_MODELS[number];
+      let forcedModel: ModelTier | undefined;
+      if (options.model) {
+        const normalized = String(options.model).toLowerCase();
+        if (!VALID_MODELS.includes(normalized as ModelTier)) {
+          console.error(chalk.red(`Error: --model must be one of ${VALID_MODELS.join(', ')} (got "${options.model}")`));
+          process.exit(1);
+        }
+        forcedModel = normalized as ModelTier;
+      }
+
       const config = await loadConfig(options.config);
       config.target.path = target;
+
+      // Resolve the effective forced model: CLI flag wins, then config's
+      // `provider.models.claude`. Either way it gets pinned globally so
+      // every task in every executor honors it.
+      const effectiveForcedModel: ModelTier | undefined =
+        forcedModel ?? (config.provider?.models?.claude as ModelTier | undefined);
+      if (effectiveForcedModel) {
+        ClaudeExecutor.setGlobalForcedModel(effectiveForcedModel);
+        console.log(chalk.cyan(`→ Forcing all Claude tasks to: ${effectiveForcedModel.toUpperCase()}`));
+        if (effectiveForcedModel === 'opus') {
+          console.log(chalk.gray('  (1M context — chunks can be larger; cost is ~5× sonnet)'));
+        }
+      }
 
       // Prevent scanning Sandyaa's own directory
       const sandyaaDir = resolve(__dirname, '..');

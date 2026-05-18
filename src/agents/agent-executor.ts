@@ -44,6 +44,7 @@ export class ClaudeExecutor {
   private rlmConfig: RLMConfig | null = null;
   private contentReplacer: ContentReplacer;
   private static globalTargetCwd: string | undefined;  // Shared across all instances
+  private static globalForcedModel: 'haiku' | 'sonnet' | 'opus' | undefined;
 
   /**
    * Set the target codebase path globally for ALL ClaudeExecutor instances.
@@ -51,6 +52,20 @@ export class ClaudeExecutor {
    */
   static setGlobalTargetPath(targetPath: string): void {
     ClaudeExecutor.globalTargetCwd = path.resolve(targetPath);
+  }
+
+  /**
+   * Pin every Claude task to a specific model, bypassing the dynamic
+   * complexity-based selector. Set from the `--model` CLI flag or the
+   * configured `provider.models.claude` so users can opt into Opus
+   * (1M context) or pin Haiku for cost-sensitive runs.
+   */
+  static setGlobalForcedModel(model: 'haiku' | 'sonnet' | 'opus'): void {
+    ClaudeExecutor.globalForcedModel = model;
+  }
+
+  static getGlobalForcedModel(): 'haiku' | 'sonnet' | 'opus' | undefined {
+    return ClaudeExecutor.globalForcedModel;
   }
 
   /** Instance-level alias for backwards compatibility */
@@ -196,6 +211,10 @@ export class ClaudeExecutor {
         // User explicitly specified model
         model = task.model;
         modelReasoning = 'explicitly specified';
+      } else if (ClaudeExecutor.globalForcedModel) {
+        // Globally forced model (--model flag or config provider.models.claude)
+        model = ClaudeExecutor.globalForcedModel;
+        modelReasoning = 'forced by --model flag / config';
       } else {
         // Dynamic selection based on complexity
         const files = this.extractFilesFromTask(task);
@@ -579,6 +598,10 @@ export class ClaudeExecutor {
         // User explicitly specified model
         model = task.model;
         modelReasoning = 'explicitly specified';
+      } else if (ClaudeExecutor.globalForcedModel) {
+        // Globally forced model (--model flag or config provider.models.claude)
+        model = ClaudeExecutor.globalForcedModel;
+        modelReasoning = 'forced by --model flag / config';
       } else {
         // Dynamic selection based on complexity
         const files = this.extractFilesFromTask(task);
